@@ -70,8 +70,24 @@ class ExnessMT5Broker(BrokerAPI):
         return {"balance": account_info.balance, "equity": account_info.equity}
 
     def get_market_data(self, symbol: str):
+        if not mt5.symbol_select(symbol, True):
+            raise ValueError(f"Symbol {symbol} not found or not visible in Market Watch.")
+    
         tick = mt5.symbol_info_tick(symbol)
-        return {"symbol": symbol, "price": tick.last}
+        if tick is None:
+            raise RuntimeError(f"Failed to get market data for {symbol}.")
+    
+    # Use last price if available, otherwise bid/ask
+        price = tick.last
+        if price == 0.0:
+            price = tick.bid if tick.bid > 0 else tick.ask
+    
+        if price == 0.0:
+            raise RuntimeError(f"Symbol {symbol} has no valid price data.")
+    
+        print(f"[Market Data] {symbol} price = {price}")  # 👈 Debug print so you can see the live price
+        return {"symbol": symbol, "price": price}
+
 
 
 # ===============================
@@ -101,12 +117,17 @@ class MovingAverageStrategy(Strategy):
 # Risk Management
 # ===============================
 class RiskManager:
-    def __init__(self, max_risk_per_trade: float = 0.01):
+    def __init__(self, max_risk_per_trade: float = 0.01, min_lot: float = 0.01, max_lot: float = 1.0):
         self.max_risk_per_trade = max_risk_per_trade
+        self.min_lot = min_lot
+        self.max_lot = max_lot
 
     def position_size(self, balance: float, price: float) -> float:
         risk_amount = balance * self.max_risk_per_trade
-        return round(risk_amount / price, 2)
+        lots = risk_amount / (price * 100000)   # basic lot size formula for forex
+        lots = max(self.min_lot, min(lots, self.max_lot))
+        return round(lots, 2)
+
 
 
 # ===============================
@@ -136,14 +157,14 @@ class TradingBot:
 # Example Run (replace with your Exness MT5 details)
 # ===============================
 if __name__ == "__main__":
-    LOGIN = 12345678  # Replace with your Exness MT5 account login
-    PASSWORD = "yourpassword"  # Replace with your Exness MT5 password
-    SERVER = "Exness-MT5Trial"  # Replace with your Exness MT5 server name
+    LOGIN = 211019157  # Replace with your Exness MT5 account login
+    PASSWORD = "Jungle123."  # Replace with your Exness MT5 password
+    SERVER = "Exness-MT5Trial9"  # Replace with your Exness MT5 server name
 
     broker = ExnessMT5Broker(LOGIN, PASSWORD, SERVER)
     strategy = MovingAverageStrategy()
     risk_manager = RiskManager(max_risk_per_trade=0.02)
 
     bot = TradingBot(broker, strategy, risk_manager)
-    bot.run("EURUSD")
+    bot.run("EURUSDm")
 
