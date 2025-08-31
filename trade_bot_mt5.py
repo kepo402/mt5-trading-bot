@@ -28,7 +28,8 @@ class ExnessMT5Broker(BrokerAPI):
         if not mt5.initialize(login=login, server=server, password=password):
             raise RuntimeError(f"MT5 initialize failed, error code: {mt5.last_error()}")
 
-    def place_order(self, symbol: str, side: str, quantity: float, order_type: str = "market", price: float = None):
+    def place_order(self, symbol: str, side: str, quantity: float, order_type: str = "market", price: float = None,
+                    sl_pips: int = 50, tp_pips: int = 100):
         symbol_info = mt5.symbol_info(symbol)
         if symbol_info is None:
             raise ValueError(f"Symbol {symbol} not found")
@@ -40,9 +41,13 @@ class ExnessMT5Broker(BrokerAPI):
         if side == "buy":
             order_type_mt5 = mt5.ORDER_TYPE_BUY
             order_price = tick.ask
+            sl = order_price - sl_pips * symbol_info.point
+            tp = order_price + tp_pips * symbol_info.point
         elif side == "sell":
             order_type_mt5 = mt5.ORDER_TYPE_SELL
             order_price = tick.bid
+            sl = order_price + sl_pips * symbol_info.point
+            tp = order_price - tp_pips * symbol_info.point
         else:
             raise ValueError("Invalid order side")
 
@@ -52,6 +57,8 @@ class ExnessMT5Broker(BrokerAPI):
             "volume": quantity,
             "type": order_type_mt5,
             "price": order_price,
+            "sl": round(sl, symbol_info.digits),
+            "tp": round(tp, symbol_info.digits),
             "deviation": 20,
             "magic": 234000,
             "comment": "python exness trade bot",
@@ -61,9 +68,10 @@ class ExnessMT5Broker(BrokerAPI):
 
         result = mt5.order_send(request)
         if result.retcode != mt5.TRADE_RETCODE_DONE:
-            print(f"Order failed: {result}")
+            print(f"❌ Order failed: {result}")
         else:
-            print(f"Order successful: {result}")
+            print(f"✅ Order successful: {result}")
+            print(f"   SL = {request['sl']} | TP = {request['tp']}")
 
     def get_balance(self):
         account_info = mt5.account_info()
@@ -100,17 +108,44 @@ class Strategy(abc.ABC):
     def generate_signal(self, market_data: Dict[str, Any]) -> str:
         pass
 
+import pandas as pd
 
 class MovingAverageStrategy(Strategy):
-    """Simple placeholder strategy."""
+    """Real Moving Average Crossover Strategy."""
+
+    def __init__(self, fast_period: int = 20, slow_period: int = 50, timeframe=mt5.TIMEFRAME_M5, bars=200):
+        self.fast_period = fast_period
+        self.slow_period = slow_period
+        self.timeframe = timeframe
+        self.bars = bars
 
     def generate_signal(self, market_data: Dict[str, Any]) -> str:
-        price = market_data["price"]
-        if price > 100:
+        symbol = market_data["symbol"]
+
+        # Get historical price data
+        rates = mt5.copy_rates_from_pos(symbol, self.timeframe, 0, self.bars)
+        if rates is None or len(rates) < self.slow_period:
+            print("[Strategy] Not enough data to calculate MAs.")
+            return "hold"
+
+        df = pd.DataFrame(rates)
+        df['close'] = df['close'].astype(float)
+
+        # Calculate moving averages
+        df['fast_ma'] = df['close'].rolling(window=self.fast_period).mean()
+        df['slow_ma'] = df['close'].rolling(window=self.slow_period).mean()
+
+        # Get the last two values to detect crossover
+        fast_prev, fast_curr = df['fast_ma'].iloc[-2], df['fast_ma'].iloc[-1]
+        slow_prev, slow_curr = df['slow_ma'].iloc[-2], df['slow_ma'].iloc[-1]
+
+        # Check crossover
+        if fast_prev < slow_prev and fast_curr > slow_curr:
             return "buy"
-        elif price < 100:
+        elif fast_prev > slow_prev and fast_curr < slow_curr:
             return "sell"
-        return "hold"
+        else:
+            return "hold"
 
 
 # ===============================
@@ -162,7 +197,8 @@ if __name__ == "__main__":
     SERVER = "Exness-MT5Trial9"  # Replace with your Exness MT5 server name
 
     broker = ExnessMT5Broker(LOGIN, PASSWORD, SERVER)
-    strategy = MovingAverageStrategy()
+    strategy = MovingAverageStrategy(fast_period=20, slow_period=50, timeframe=mt5.TIMEFRAME_M5)
+
     risk_manager = RiskManager(max_risk_per_trade=0.02)
 
     bot = TradingBot(broker, strategy, risk_manager)
