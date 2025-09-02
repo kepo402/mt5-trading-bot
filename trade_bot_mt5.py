@@ -146,6 +146,79 @@ class MovingAverageStrategy(Strategy):
             return "sell"
         else:
             return "hold"
+        
+        
+        import pandas as pd
+
+class SmartStrategy(Strategy):
+    """Improved strategy with MA crossover + RSI + ATR filters."""
+
+    def __init__(self, fast_period=20, slow_period=50, rsi_period=14, atr_period=14,
+                 timeframe=mt5.TIMEFRAME_M5, bars=500, atr_threshold=0.0005):
+        self.fast_period = fast_period
+        self.slow_period = slow_period
+        self.rsi_period = rsi_period
+        self.atr_period = atr_period
+        self.timeframe = timeframe
+        self.bars = bars
+        self.atr_threshold = atr_threshold  # filter to avoid dead markets
+
+    def generate_signal(self, market_data: Dict[str, Any]) -> str:
+        symbol = market_data["symbol"]
+
+        # Get historical data
+        rates = mt5.copy_rates_from_pos(symbol, self.timeframe, 0, self.bars)
+        if rates is None or len(rates) < max(self.slow_period, self.rsi_period, self.atr_period):
+            print("[Strategy] Not enough data for indicators.")
+            return "hold"
+
+        df = pd.DataFrame(rates)
+        df['close'] = df['close'].astype(float)
+        df['high'] = df['high'].astype(float)
+        df['low'] = df['low'].astype(float)
+
+        # Moving averages
+        df['fast_ma'] = df['close'].rolling(window=self.fast_period).mean()
+        df['slow_ma'] = df['close'].rolling(window=self.slow_period).mean()
+
+        # RSI
+        delta = df['close'].diff()
+        gain = delta.clip(lower=0)
+        loss = -delta.clip(upper=0)
+        avg_gain = gain.rolling(window=self.rsi_period).mean()
+        avg_loss = loss.rolling(window=self.rsi_period).mean()
+        rs = avg_gain / (avg_loss + 1e-10)
+        df['rsi'] = 100 - (100 / (1 + rs))
+
+        # ATR
+        df['tr1'] = df['high'] - df['low']
+        df['tr2'] = abs(df['high'] - df['close'].shift())
+        df['tr3'] = abs(df['low'] - df['close'].shift())
+        df['tr'] = df[['tr1', 'tr2', 'tr3']].max(axis=1)
+        df['atr'] = df['tr'].rolling(window=self.atr_period).mean()
+
+        # Latest values
+        fast_prev, fast_curr = df['fast_ma'].iloc[-2], df['fast_ma'].iloc[-1]
+        slow_prev, slow_curr = df['slow_ma'].iloc[-2], df['slow_ma'].iloc[-1]
+        rsi_curr = df['rsi'].iloc[-1]
+        atr_curr = df['atr'].iloc[-1]
+
+        # ATR filter
+        if atr_curr < self.atr_threshold:
+            print("[Strategy] Market too quiet, skipping.")
+            return "hold"
+
+        # Buy condition
+        if fast_prev < slow_prev and fast_curr > slow_curr and rsi_curr > 55:
+            return "buy"
+
+        # Sell condition
+        elif fast_prev > slow_prev and fast_curr < slow_curr and rsi_curr < 45:
+            return "sell"
+
+        else:
+            return "hold"
+
 
 
 # ===============================
@@ -259,7 +332,15 @@ if __name__ == "__main__":
     SERVER = "Exness-MT5Trial9"
 
     broker = ExnessMT5Broker(LOGIN, PASSWORD, SERVER)
-    strategy = MovingAverageStrategy(fast_period=20, slow_period=50, timeframe=mt5.TIMEFRAME_M5)
+    strategy = SmartStrategy(
+    fast_period=20,
+    slow_period=50,
+    rsi_period=14,
+    atr_period=14,
+    timeframe=mt5.TIMEFRAME_M5,
+    atr_threshold=0.0005   # adjust based on symbol volatility
+)
+
     risk_manager = RiskManager(max_risk_per_trade=0.02)
     prop_rules = PropFirmRules(
     daily_loss_limit_pct=4.0,   # daily max loss
