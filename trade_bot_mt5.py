@@ -162,45 +162,112 @@ class RiskManager:
         lots = risk_amount / (price * 100000)   # basic lot size formula for forex
         lots = max(self.min_lot, min(lots, self.max_lot))
         return round(lots, 2)
+    
+    
+    # ===============================
+# Prop Firm Rules
+# ===============================
+from datetime import datetime
+class PropFirmRules:
+    def __init__(self, daily_loss_limit_pct=4.0, max_trades_per_day=3, max_overall_loss_pct=10.0):
+        self.daily_loss_limit_pct = daily_loss_limit_pct
+        self.max_trades_per_day = max_trades_per_day
+        self.max_overall_loss_pct = max_overall_loss_pct
 
+        self.starting_balance = None   # first balance when bot starts
+        self.starting_equity_today = None
+        self.trades_today = 0
+        self.last_reset_date = None
 
+    def reset_daily(self, current_equity):
+        today = datetime.now().date()
+        if self.last_reset_date != today:
+            self.starting_equity_today = current_equity
+            self.trades_today = 0
+            self.last_reset_date = today
+            print(f"[PropRules] Daily reset: starting equity = {current_equity}")
 
+    def can_trade(self, current_equity):
+        # Set starting balance once
+        if self.starting_balance is None:
+            self.starting_balance = current_equity
+
+        # Reset daily
+        self.reset_daily(current_equity)
+
+        # Check daily drawdown
+        loss_pct = ((current_equity - self.starting_equity_today) / self.starting_equity_today) * 100
+        if loss_pct <= -self.daily_loss_limit_pct:
+            print(f"[PropRules] ❌ Daily loss limit hit ({loss_pct:.2f}%). No more trades today.")
+            return False
+
+        # Check overall drawdown
+        overall_loss_pct = ((current_equity - self.starting_balance) / self.starting_balance) * 100
+        if overall_loss_pct <= -self.max_overall_loss_pct:
+            print(f"[PropRules] ❌ Overall loss limit hit ({overall_loss_pct:.2f}%). Trading stopped.")
+            return False
+
+        # Check trade count
+        if self.trades_today >= self.max_trades_per_day:
+            print("[PropRules] ❌ Max trades reached today. No more trades.")
+            return False
+
+        return True
+
+    def register_trade(self):
+        self.trades_today += 1
+         
+        
+        
 # ===============================
 # Trading Engine
 # ===============================
 class TradingBot:
-    def __init__(self, broker: BrokerAPI, strategy: Strategy, risk_manager: RiskManager):
+    def __init__(self, broker: BrokerAPI, strategy: Strategy, risk_manager: RiskManager, prop_rules: PropFirmRules):
         self.broker = broker
         self.strategy = strategy
         self.risk_manager = risk_manager
+        self.prop_rules = prop_rules
 
     def run(self, symbol: str):
         market_data = self.broker.get_market_data(symbol)
         signal = self.strategy.generate_signal(market_data)
-        balance = self.broker.get_balance()["balance"]
+        account = self.broker.get_balance()
+        balance = account["equity"]
         qty = self.risk_manager.position_size(balance, market_data["price"])
 
-        if signal == "buy":
-            self.broker.place_order(symbol, "buy", qty)
-        elif signal == "sell":
-            self.broker.place_order(symbol, "sell", qty)
+        if self.prop_rules.can_trade(balance):
+            if signal == "buy":
+                self.broker.place_order(symbol, "buy", qty)
+                self.prop_rules.register_trade()
+            elif signal == "sell":
+                self.broker.place_order(symbol, "sell", qty)
+                self.prop_rules.register_trade()
+            else:
+                print("[Bot] Holding position, no action.")
         else:
-            print("[Bot] Holding position, no action.")
+            print("[Bot] Prop rules blocked trading today.")
+
 
 
 # ===============================
 # Example Run (replace with your Exness MT5 details)
 # ===============================
 if __name__ == "__main__":
-    LOGIN = 211019157  # Replace with your Exness MT5 account login
-    PASSWORD = "Jungle123."  # Replace with your Exness MT5 password
-    SERVER = "Exness-MT5Trial9"  # Replace with your Exness MT5 server name
+    LOGIN = 211019157
+    PASSWORD = "Jungle123."
+    SERVER = "Exness-MT5Trial9"
 
     broker = ExnessMT5Broker(LOGIN, PASSWORD, SERVER)
     strategy = MovingAverageStrategy(fast_period=20, slow_period=50, timeframe=mt5.TIMEFRAME_M5)
-
     risk_manager = RiskManager(max_risk_per_trade=0.02)
+    prop_rules = PropFirmRules(
+    daily_loss_limit_pct=4.0,   # daily max loss
+    max_trades_per_day=3,       # trades per day
+    max_overall_loss_pct=10.0   # overall max loss (like prop firms)
+)
 
-    bot = TradingBot(broker, strategy, risk_manager)
+
+    bot = TradingBot(broker, strategy, risk_manager, prop_rules)
     bot.run("EURUSDm")
 
